@@ -304,15 +304,16 @@ def page_home_browse():
         col = cols[index % 3]
         
         # Determine the primary option for display (Simulated for UI demonstration)
-        if row['ResourceID'] % 3 == 0: option_tag, tag_color = "BUY/SELL", "#007bff"
-        elif row['ResourceID'] % 3 == 1: option_tag, tag_color = "LEND/BORROW", "#28a745"
-        else: option_tag, tag_color = "BARTER", "#ffc107"
+        # We also set the action_page variable here
+        if row['ResourceID'] % 3 == 0: option_tag, tag_color, action_page = "BUY/SELL", "#007bff", 'buysell'
+        elif row['ResourceID'] % 3 == 1: option_tag, tag_color, action_page = "LEND/BORROW", "#28a745", 'lendborrow'
+        else: option_tag, tag_color, action_page = "BARTER", "#ffc107", 'barter'
             
         # Apply option filter
         if selected_option != 'All Options':
-            if selected_option == 'Buy/Sell' and option_tag != 'BUY/SELL': continue
-            if selected_option == 'Lend/Borrow' and option_tag != 'LEND/BORROW': continue
-            if selected_option == 'Barter' and option_tag != 'BARTER': continue
+            if selected_option == 'Buy/Sell' and action_page != 'buysell': continue
+            if selected_option == 'Lend/Borrow' and action_page != 'lendborrow': continue
+            if selected_option == 'Barter' and action_page != 'barter': continue
 
         
         with col:
@@ -321,23 +322,24 @@ def page_home_browse():
                 # Header with Tag
                 st.markdown(f"#### {row['Title']} <span style='background-color: {tag_color}; color: white; padding: 3px 8px; border-radius: 4px; font-size: 14px;'>{option_tag}</span>", unsafe_allow_html=True)
                 
-                # Image Display Logic (Uses st.image and Pathlib for safety)
+                # Image Display Logic 
                 image_full_path = BASE_DIR / row['ImagePath'] if row['ImagePath'] else None
                 
                 if image_full_path and os.path.exists(image_full_path):
                     st.image(str(image_full_path), caption=row['Title'], use_column_width='always')
                 else:
-                    # Display the placeholder container (Simplified to avoid HTML breaks)
                     st.markdown(f'<div style="width: 100%; height: 150px; background-color: #f0f0f0; text-align: center; line-height: 150px; color: #777; border-radius: 5px; font-size: 12px;">{IMAGE_PLACEHOLDER}</div>', unsafe_allow_html=True)
 
                 # Details
                 st.caption(f"**Category:** {row['CategoryName']} | **Condition:** {row['itemCondition']}")
                 st.markdown(f"*{row['Description'][:70]}...*")
 
-                # The functional button
+                # The functional button - REDIRECTION FIX IMPLEMENTED HERE
                 if st.button(f"View/Act on {row['ResourceID']}", key=f"act_{row['ResourceID']}", use_container_width=True):
                      st.session_state.target_resource_id = row['ResourceID']
-                     st.info(f"Redirecting to action for Resource ID: {row['ResourceID']}")
+                     st.session_state.page = action_page # Set page based on item type
+                     st.rerun() # Force page reload
+            # --- END FIXED UI RENDERING ---
 
 
 # --- 4. Upload Pages (Sell/Lend/Barter - Image Saving Fix) ---
@@ -599,7 +601,6 @@ def page_lendborrow():
                 
                 try:
                     # Call Stored Procedure 'initiate_lend'
-                    # The procedure handles INSERT into Transactions, LendBorrow, updates Resource status, and creates Reminders.
                     cursor.callproc('initiate_lend', (borrow_resource_id, lender_srn, user_srn, start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d'), 0)) 
                     conn.commit()
                     st.success(f"Borrowing initiated for Resource ID: {borrow_resource_id}. Resource status updated to 'Unavailable'.")
@@ -641,7 +642,6 @@ def page_lendborrow():
                 try:
                     cursor = conn.cursor()
                     # Call Stored Procedure 'complete_lend_with_penalty'
-                    # This procedure calls the FUNCTION 'calculate_penalty'.
                     cursor.callproc('complete_lend_with_penalty', (return_lb_id,))
                     conn.commit()
                     
