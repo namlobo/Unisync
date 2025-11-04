@@ -1,0 +1,10 @@
+.streamlit/secrets.toml
+
+# Python virtual environment folder
+venv/
+.venv/
+
+# Byte-compiled Python files
+__pycache__/
+*.pyc
+```eof
