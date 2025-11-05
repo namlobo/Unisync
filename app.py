@@ -1,4 +1,4 @@
-# app.py - UniSync Student Resource Hub (FINAL: Complete Functionality and Flow)
+# app.py - UniSync Student Resource Hub (FIXED: Critical Issues Patched)
 
 import streamlit as st
 import mysql.connector
@@ -29,6 +29,7 @@ IMAGE_PLACEHOLDER = "Click to Upload Image"
 if 'logged_in_srn' not in st.session_state: st.session_state.logged_in_srn = None
 if 'page' not in st.session_state: st.session_state.page = 'landing' 
 if 'history' not in st.session_state: st.session_state.history = ['landing']
+# We will initialize other flags (like 'barter_proposed') inside their respective pages
 
 # --- File System Utility (Remains the same) ---
 def save_uploaded_file(uploaded_file):
@@ -44,15 +45,26 @@ def save_uploaded_file(uploaded_file):
         st.error(f"Error saving file: {e}")
         return None
 
-# --- Navigation and History Functions (BACK BUTTON FIX) ---
+# --- FIX 1: Add a function to reset submission flags ---
+def reset_submission_flags():
+    """Resets all form submission flags when navigating."""
+    if 'barter_proposed' in st.session_state:
+        st.session_state.barter_proposed = False
+    # Add other flags here if you create more, e.g.:
+    # st.session_state.review_submitted = False
+
+# --- FIX 2: Update Navigation to reset flags ---
 def navigate_to(page_name):
+    reset_submission_flags() # Reset flags on any navigation
     if not st.session_state.history or st.session_state.history[-1] != page_name:
         st.session_state.history.append(page_name)
     st.session_state.page = page_name
     st.rerun()
 
+# --- FIX 3: Update Go Back to reset flags ---
 def go_back():
     """Navigates to the previous page in history."""
+    reset_submission_flags() # Reset flags on any navigation
     if len(st.session_state.history) > 1:
         st.session_state.history.pop()
         previous_page = st.session_state.history.pop()
@@ -96,7 +108,7 @@ def fetch_all_categories(conn):
         FROM Category
         GROUP BY MainType
         ORDER BY 
-            CASE WHEN MainType = 'Misc' THEN 1 ELSE 0 END,
+            CASE WHEN MainType = 'Miscellaneous' THEN 1 ELSE 0 END, -- <-- FIX: Changed 'Misc' to 'Miscellaneous'
             MainType
     """)
     categories = cursor.fetchall()
@@ -190,7 +202,7 @@ def page_signup():
                     conn.close()
 
     st.markdown('**Already have an account?**')
-    if st.button("Go to Log In", key='signup_to_login'): navigate_to('login')
+    if st.button("Go to Log In", key='login_to_signup'): navigate_to('login')
 
 # --- 3. Home Page (Browsing & Filtering) ---
 def page_home_browse():
@@ -204,7 +216,12 @@ def page_home_browse():
     if st.sidebar.button("🔄 **BARTER** an Item", use_container_width=True): navigate_to('upload_barter')
     st.sidebar.markdown("---")
     if st.sidebar.button("⚙️ My Activity/Transactions", use_container_width=True): navigate_to('my_activity')
-    if st.sidebar.button("🚪 Logout", use_container_width=True): st.session_state.logged_in_srn = None; st.session_state.page = 'landing'; st.rerun()
+    if st.sidebar.button("🚪 Logout", use_container_width=True): 
+        # --- FIX: Also reset flags on logout ---
+        reset_submission_flags()
+        st.session_state.logged_in_srn = None
+        st.session_state.page = 'landing'
+        st.rerun()
 
     st.title("Explore UniSync Resources")
     
@@ -222,32 +239,42 @@ def page_home_browse():
     option_filters = ['All Options', 'Buy/Sell', 'Lend/Borrow', 'Barter']
     selected_option = col_filter2.selectbox("Filter by Transaction Type", option_filters)
     
-    # --- Dynamic Query Construction (Includes ImagePath) ---
-    base_query = f"""
+    # --- *** CRITICAL FIX 3: SQL Injection Patch and Dynamic Query ---
+    
+    # Base query now selects the ListingType
+    base_query = """
         SELECT 
-            r.ResourceID, r.Title, r.Description, r.itemCondition, r.ImagePath,
+            r.ResourceID, r.Title, r.Description, r.itemCondition, r.ImagePath, r.ListingType,
             CONCAT(c.MainType, ' - ', c.SubType) AS CategoryName, c.Cat_ID
         FROM Resource r
         JOIN Category c ON r.CategoryID = c.Cat_ID
-        WHERE r.Status = 'Available'
     """
     
-    if search_query: base_query += f" AND (r.Title LIKE '%%{search_query}%%' OR r.Description LIKE '%%{search_query}%%')"
+    # Use parameterized queries to prevent SQL Injection
+    where_clauses = ["r.Status = 'Available'"]
+    params = []
+    
+    if search_query:
+        where_clauses.append("(r.Title LIKE %s OR r.Description LIKE %s)")
+        params.extend([f"%%{search_query}%%", f"%%{search_query}%%"])
     
     # Category Filtering Logic (Handles MainType selection)
     if selected_category_name != 'All Categories':
-        selected_main_type = selected_category_name
-        conn_temp = get_db_connection()
-        if conn_temp:
-            cursor = conn_temp.cursor()
-            cursor.execute("SELECT Cat_ID FROM Category WHERE MainType = %s", (selected_main_type,))
-            matching_ids = [str(row[0]) for row in cursor.fetchall()]
-            conn_temp.close()
-            
-            if matching_ids:
-                 base_query += f" AND r.CategoryID IN ({','.join(matching_ids)})"
+        # This part is safe as it's not direct user input
+        where_clauses.append("c.MainType = %s")
+        params.append(selected_category_name)
 
-    df_resources = pd.read_sql(base_query, conn)
+    # Apply Transaction Type filter
+    if selected_option != 'All Options':
+        type_map = {'Buy/Sell': 'Sell', 'Lend/Borrow': 'Lend', 'Barter': 'Barter'}
+        where_clauses.append("r.ListingType = %s")
+        params.append(type_map[selected_option])
+    
+    # Finalize query
+    final_query = base_query + " WHERE " + " AND ".join(where_clauses)
+    
+    # Pass parameters safely to pandas
+    df_resources = pd.read_sql(final_query, conn, params=params)
     conn.close()
 
     # --- Display Results ---
@@ -263,17 +290,18 @@ def page_home_browse():
     for index, row in df_resources.iterrows():
         col = cols[index % 3]
         
-        # Determine the primary option for display and redirection
-        if row['ResourceID'] % 3 == 0: option_tag, tag_color, action_page = "BUY/SELL", "#007bff", 'buysell'
-        elif row['ResourceID'] % 3 == 1: option_tag, tag_color, action_page = "LEND/BORROW", "#28a745", 'lendborrow'
-        else: option_tag, tag_color, action_page = "BARTER", "#ffc107", 'barter'
+        # --- *** CRITICAL FIX 4: Use ListingType, not ResourceID % 3 ***
+        # This correctly identifies the item type based on data from the DB
+        listing_type = row['ListingType']
+        if listing_type == 'Sell': 
+            option_tag, tag_color, action_page = "BUY/SELL", "#007bff", 'buysell'
+        elif listing_type == 'Lend': 
+            option_tag, tag_color, action_page = "LEND/BORROW", "#28a745", 'lendborrow'
+        else: # Barter
+            option_tag, tag_color, action_page = "BARTER", "#ffc107", 'barter'
             
-        # Apply option filter
-        if selected_option != 'All Options':
-            if selected_option == 'Buy/Sell' and action_page != 'buysell': continue
-            if selected_option == 'Lend/Borrow' and action_page != 'lendborrow': continue
-            if selected_option == 'Barter' and action_page != 'barter': continue
-
+        # Note: The filter logic is now handled by the SQL query, 
+        # so the old Python `if selected_option ... continue` block is no longer needed.
         
         with col:
             with st.container(border=True): 
@@ -282,7 +310,8 @@ def page_home_browse():
                 image_full_path = BASE_DIR / row['ImagePath'] if row['ImagePath'] else None
                 
                 if row['ImagePath'] and os.path.exists(image_full_path):
-                    st.image(str(image_full_path), caption=row['Title'], use_column_width='always')
+                    # --- FIX: Hide Warning ---
+                    st.image(str(image_full_path), caption=row['Title'], use_container_width=True)
                 else:
                     st.markdown(f'<div style="width: 100%; height: 150px; background-color: #f0f0f0; text-align: center; line-height: 150px; color: #777; border-radius: 5px; font-size: 12px;">{IMAGE_PLACEHOLDER}</div>', unsafe_allow_html=True)
 
@@ -290,8 +319,9 @@ def page_home_browse():
                 st.markdown(f"*{row['Description'][:70]}...*")
 
                 if st.button(f"View/Act on {row['ResourceID']}", key=f"act_{row['ResourceID']}", use_container_width=True):
-                     st.session_state.target_resource_id = row['ResourceID']
-                     navigate_to(action_page) 
+                    # Store target_resource_id only if needed by target page (e.g., buysell)
+                    # st.session_state.target_resource_id = row['ResourceID'] 
+                    navigate_to(action_page) 
 
 
 # --- 4. Upload Pages ---
@@ -316,7 +346,8 @@ def page_upload_item(action_type):
         with col_img:
             st.subheader("Image Upload")
             uploaded_file = st.file_uploader("Upload Item Photo (Optional)", type=['png', 'jpg', 'jpeg'])
-            if uploaded_file: st.image(uploaded_file, caption="Uploaded Image Preview")
+            # --- FIX: Hide Warning ---
+            if uploaded_file: st.image(uploaded_file, caption="Uploaded Image Preview", use_container_width=True)
         
         with col_details:
             title = st.text_input("Item Title (e.g., 'DBMS Book', 'Study Chair')")
@@ -353,19 +384,26 @@ def page_upload_item(action_type):
                 if not title: st.error("Title is required."); return
                 if category_id is None: st.error("Category ID could not be determined. Please ensure the selected category exists in the database."); return
 
+                # --- *** CRITICAL FIX 5: Insert the ListingType into Resource ***
+                # This ensures the item is correctly tagged from the moment it's created.
                 query_resource = """
-                INSERT INTO Resource (Title, Description, itemCondition, Status, OwnerID, CategoryID, ImagePath)
-                VALUES (%s, %s, %s, 'Available', %s, %s, %s)
+                INSERT INTO Resource (Title, Description, itemCondition, Status, OwnerID, CategoryID, ImagePath, ListingType)
+                VALUES (%s, %s, %s, 'Available', %s, %s, %s, %s)
                 """
-                cursor.execute(query_resource, (title, description, item_condition, st.session_state.logged_in_srn, category_id, image_path_to_db))
+                cursor.execute(query_resource, (title, description, item_condition, st.session_state.logged_in_srn, category_id, image_path_to_db, action_type))
                 resource_id = cursor.lastrowid
                 
+                # This part of your logic was already correct:
+                # Only 'sell' creates a corresponding record immediately.
+                # 'lend' and 'barter' items are just listed as resources, 
+                # which is correct for this app design.
                 if action_type == 'sell':
                     query_bs = """
-                    INSERT INTO BuySell (ItemID, SellerID, BuyerID, Price, Status, TransactionDate)
-                    VALUES (%s, %s, %s, %s, 'Listed', CURDATE())
+                    INSERT INTO BuySell (ItemID, SellerID, Price, Status, TransactionDate)
+                    VALUES (%s, %s, %s, 'Listed', CURDATE())
                     """
-                    cursor.execute(query_bs, (resource_id, st.session_state.logged_in_srn, st.session_state.logged_in_srn, action_specific_data))
+                    # Note: Removed BuyerID from insert, as it's NULL on listing
+                    cursor.execute(query_bs, (resource_id, st.session_state.logged_in_srn, action_specific_data))
                 
                 conn.commit()
                 st.success(f"Item '{title}' successfully listed for {action_type}! Resource ID: {resource_id}")
@@ -392,6 +430,8 @@ def page_buysell():
         conn = get_db_connection()
         if not conn: return
         
+        # This query is now correct because the homepage 
+        # only sends users here for items that are ACTUALLY for sale.
         query = """
         SELECT 
             r.ResourceID, r.Title, r.Description, r.itemCondition, 
@@ -399,7 +439,10 @@ def page_buysell():
         FROM Resource r
         JOIN Student s ON r.OwnerID = s.SRN
         JOIN BuySell bs ON r.ResourceID = bs.ItemID 
-        WHERE r.Status = 'Available' AND r.OwnerID != %s AND bs.Status NOT IN ('Completed', 'PendingConfirmation', 'PendingPayment')
+        WHERE r.Status = 'Available' 
+          AND r.ListingType = 'Sell' -- Ensures it's a 'Sell' item
+          AND r.OwnerID != %s 
+          AND bs.Status = 'Listed' -- Only show items that are 'Listed'
         """
         df = pd.read_sql(query, conn, params=(user_srn,))
 
@@ -409,14 +452,27 @@ def page_buysell():
             st.dataframe(df)
             st.markdown("---")
             st.markdown("#### Initiate Purchase")
+            
+            # Check if there are any items left to select
+            if df['ResourceID'].empty:
+                st.info("No items available to purchase.")
+                conn.close()
+                return
+
             buy_resource_id = st.selectbox("Select Resource ID to Purchase", df['ResourceID'].unique())
             
             if st.button("Request Purchase"):
                 try:
                     cursor = conn.cursor()
                     
-                    cursor.execute("SELECT OwnerID, Price FROM BuySell WHERE ItemID = %s LIMIT 1", (buy_resource_id,))
+                    # Your payment logic is correct
+                    cursor.execute("SELECT SellerID, Price FROM BuySell WHERE ItemID = %s AND Status = 'Listed' LIMIT 1", (buy_resource_id,))
                     res_info = cursor.fetchone()
+                    
+                    if not res_info:
+                        st.error("This item is no longer available or already pending.")
+                        return
+                    
                     seller_srn = res_info[0]
                     price = res_info[1]
 
@@ -429,13 +485,14 @@ def page_buysell():
                     
                     conn.commit()
                     st.success(f"Purchase request initiated for Resource ID: {buy_resource_id} (Price: ₹{price:.2f}). Please provide transaction ID in the **Confirm Sales** tab.")
+                    st.rerun() # Rerun to update the dataframe
                 except mysql.connector.Error as err:
                     st.error(f"Failed to initiate purchase: {err}")
                 finally:
                     cursor.close()
         conn.close()
 
-    # Tab 2: Confirm Sales (U-operation - Custom Payment Validation)
+    # Tab 2: Confirm Sales (This section is correct and implements your payment flow)
     with tab2:
         st.subheader("Payment Validation")
         conn = get_db_connection()
@@ -468,6 +525,8 @@ def page_buysell():
                         st.error(f"Failed to submit Transaction ID: {err}")
                     finally:
                         cursor.close()
+        else:
+            st.info("You have no pending payments to confirm.")
 
         st.markdown("---")
         # Seller Action (Confirming Transaction ID)
@@ -513,13 +572,17 @@ def page_lendborrow():
         conn = get_db_connection()
         if not conn: return
         
+        # This query is now correct because the homepage 
+        # only sends users here for items that are ACTUALLY for lend.
         query = """
         SELECT 
             r.ResourceID, r.Title, r.Description, r.itemCondition, 
             CONCAT(s.FirstName, ' ', s.LastName) AS LenderName
         FROM Resource r
         JOIN Student s ON r.OwnerID = s.SRN
-        WHERE r.Status = 'Available' AND r.OwnerID != %s
+        WHERE r.Status = 'Available' 
+          AND r.ListingType = 'Lend' -- This is the fix
+          AND r.OwnerID != %s
         """
         df = pd.read_sql(query, conn, params=(user_srn,))
         
@@ -532,6 +595,11 @@ def page_lendborrow():
 
         st.markdown("---")
         st.markdown("#### Request to Borrow")
+        
+        if df['ResourceID'].empty:
+            conn.close()
+            return
+            
         borrow_resource_id = st.selectbox("Select Resource ID to Borrow", df['ResourceID'].unique())
         start_date = st.date_input("Start Date", datetime.today())
         default_end_date = datetime.today() + pd.Timedelta(days=7) 
@@ -543,9 +611,18 @@ def page_lendborrow():
             else:
                 cursor = conn.cursor()
                 cursor.execute("SELECT OwnerID FROM Resource WHERE ResourceID = %s", (borrow_resource_id,))
-                lender_srn = cursor.fetchone()[0]
+                lender_srn_tuple = cursor.fetchone()
+                
+                if not lender_srn_tuple:
+                    st.error("Resource not found.")
+                    cursor.close()
+                    conn.close()
+                    return
+                
+                lender_srn = lender_srn_tuple[0]
                 
                 try:
+                    # Your logic for calling the stored procedure is correct.
                     cursor.callproc('initiate_lend', (borrow_resource_id, lender_srn, user_srn, start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d'), 0)) 
                     conn.commit()
                     st.success(f"Borrowing initiated for Resource ID: {borrow_resource_id}. Resource status updated to 'Unavailable'.")
@@ -556,7 +633,7 @@ def page_lendborrow():
                     if cursor: cursor.close()
         conn.close()
 
-    # Tab 2: Manage Active Loans (U-operation with Penalty)
+    # Tab 2: Manage Active Loans (This logic was already correct)
     with tab2:
         st.subheader("Manage Items to Return")
         conn = get_db_connection()
@@ -587,17 +664,15 @@ def page_lendborrow():
             if not df_ongoing.empty:
                 return_id = st.selectbox("Select Loan ID to Return", df_ongoing['LendBorrowID'].unique(), key="return_id_select")
                 
-                # --- RETURN BUTTON FIX: Now correctly triggers the stored procedure ---
                 if st.button("Confirm Return Early / On Time", key="confirm_return_btn"):
                     try:
                         cursor = conn.cursor()
-                        # NOTE: The bug was likely in the stored procedure query structure (fixed outside this file).
                         cursor.callproc('complete_lend_with_penalty', (return_id,))
                         conn.commit()
                         
-                        # Fetch calculated penalty for display
                         cursor.execute("SELECT PenaltyAmount FROM LendBorrow WHERE LendBorrowID = %s", (return_id,))
-                        penalty = cursor.fetchone()[0]
+                        penalty_tuple = cursor.fetchone()
+                        penalty = penalty_tuple[0] if penalty_tuple else 0
                         
                         if penalty > 0:
                             st.warning(f"Item returned. **LATE RETURN** - A penalty of **₹{penalty:.2f}** has been applied.")
@@ -616,7 +691,7 @@ def page_lendborrow():
             ]
             
             if not df_completed_unreviewed.empty:
-                st.info("You have completed loans pending review. Please use the 'My Reviews' tab.")
+                st.info("You have completed loans pending review. Please use the 'My Reviews' tab in 'My Activity'.")
                 
         conn.close()
 
@@ -625,11 +700,16 @@ def page_barter():
     st.header("🔄 Barter Management (Propose & Review)")
     user_srn = st.session_state.logged_in_srn
 
+    # --- FIX: Initialize the session state flag for this page ---
+    if 'barter_proposed' not in st.session_state:
+        st.session_state.barter_proposed = False
+
     tab1, tab2, tab3 = st.tabs(["Propose Barter", "Review Proposals", "My Barters"])
     
     conn = get_db_connection()
     if not conn: return
-    user_resources = pd.read_sql("SELECT ResourceID, Title FROM Resource WHERE OwnerID = %s AND Status = 'Available'", conn, params=(user_srn,))
+    # Users can only offer their own 'Barter' items
+    user_resources = pd.read_sql("SELECT ResourceID, Title FROM Resource WHERE OwnerID = %s AND Status = 'Available' AND ListingType = 'Barter'", conn, params=(user_srn,))
     resource_map = {f"{r['Title']} (ID: {r['ResourceID']})": r['ResourceID'] for r in user_resources.to_dict('records')}
     resource_names = list(resource_map.keys())
     conn.close()
@@ -637,66 +717,90 @@ def page_barter():
     # Tab 1: Propose Barter (C-operation)
     with tab1:
         st.subheader("Propose a New Barter")
-        if not resource_names:
-            st.info("You must have available items to propose a barter.")
-            return
 
-        conn = get_db_connection()
-        if not conn: return
-        query_others = """
-        SELECT ResourceID, Title, CONCAT(s.FirstName, ' ', s.LastName) AS OwnerName
-        FROM Resource r JOIN Student s ON r.OwnerID = s.SRN
-        WHERE r.Status = 'Available' AND r.OwnerID != %s
-        """
-        df_others = pd.read_sql(query_others, conn, params=(user_srn,))
-        conn.close()
+        # --- FIX: Logic to show message OR form ---
+        if st.session_state.get('barter_proposed', False):
+            st.success("✅ Barter proposal submitted! Awaiting acceptance.")
+            st.info("The other user will see this in their 'Review Proposals' tab.")
+            # This hides the form by not running the 'else' block
+        
+        else:
+            # This 'else' block contains all your original form logic
+            if not resource_names:
+                st.info("You must have 'Barter' items listed as 'Available' to propose a trade.")
+                return
 
-        if df_others.empty:
-            st.info("No available items from other students to barter with.")
-            return
-
-        other_map = {f"{r['Title']} (Owner: {r['OwnerName']}) (ID: {r['ResourceID']})": r['ResourceID'] for r in df_others.to_dict('records')}
-        other_names = list(other_map.keys())
-
-        with st.form("propose_barter_form"):
-            item1_name = st.selectbox("Your Item (Item 1)", resource_names)
-            item2_name = st.selectbox("Item You Want (Item 2)", other_names)
+            conn = get_db_connection()
+            if not conn: return
             
-            if st.form_submit_button("Submit Barter Proposal"):
-                item1_id = resource_map[item1_name]
-                item2_id = other_map[item2_name]
+            # Users can only trade for other 'Barter' items
+            query_others = """
+            SELECT ResourceID, Title, CONCAT(s.FirstName, ' ', s.LastName) AS OwnerName
+            FROM Resource r JOIN Student s ON r.OwnerID = s.SRN
+            WHERE r.Status = 'Available' 
+              AND r.ListingType = 'Barter' -- This is the fix
+              AND r.OwnerID != %s
+            """
+            df_others = pd.read_sql(query_others, conn, params=(user_srn,))
+            conn.close()
+
+            if df_others.empty:
+                st.info("No available 'Barter' items from other students to trade with.")
+                return
+
+            other_map = {f"{r['Title']} (Owner: {r['OwnerName']}) (ID: {r['ResourceID']})": r['ResourceID'] for r in df_others.to_dict('records')}
+            other_names = list(other_map.keys())
+
+            with st.form("propose_barter_form"):
+                item1_name = st.selectbox("Your Item (Item 1)", resource_names)
+                item2_name = st.selectbox("Item You Want (Item 2)", other_names)
                 
-                conn = get_db_connection()
-                if conn:
-                    try:
-                        cursor = conn.cursor()
-                        cursor.execute("SELECT OwnerID FROM Resource WHERE ResourceID = %s", (item2_id,))
-                        accepter_id = cursor.fetchone()[0]
-                        
-                        cursor.execute("INSERT INTO Transactions (Type) VALUES ('Barter')")
-                        trans_id = cursor.lastrowid
-                        
-                        query = """
-                        INSERT INTO Barter (Item1ID, Item2ID, ProposerID, AccepterID, Status, BarterDate, TransactionID)
-                        VALUES (%s, %s, %s, %s, 'Pending', CURDATE(), %s)
-                        """
-                        cursor.execute(query, (item1_id, item2_id, user_srn, accepter_id, trans_id))
-                        conn.commit()
-                        st.success(f"Barter proposal submitted! Item {item1_id} for Item {item2_id}. Awaiting acceptance.")
-                        st.rerun()
-                    except mysql.connector.Error as err:
-                        st.error(f"Failed to submit barter: {err}")
-                    finally:
-                        cursor.close()
-                        conn.close()
+                if st.form_submit_button("Submit Barter Proposal"):
+                    item1_id = resource_map[item1_name]
+                    item2_id = other_map[item2_name]
+                    
+                    conn = get_db_connection()
+                    if conn:
+                        try:
+                            cursor = conn.cursor()
+                            cursor.execute("SELECT OwnerID FROM Resource WHERE ResourceID = %s", (item2_id,))
+                            accepter_id_tuple = cursor.fetchone()
+                            if not accepter_id_tuple:
+                                st.error("Target item not found.")
+                                return
+                            accepter_id = accepter_id_tuple[0]
+                            
+                            cursor.execute("INSERT INTO Transactions (Type) VALUES ('Barter')")
+                            trans_id = cursor.lastrowid
+                            
+                            query = """
+                            INSERT INTO Barter (Item1ID, Item2ID, ProposerID, AccepterID, Status, BarterDate, TransactionID)
+                            VALUES (%s, %s, %s, %s, 'Pending', CURDATE(), %s)
+                            """
+                            cursor.execute(query, (item1_id, item2_id, user_srn, accepter_id, trans_id))
+                            conn.commit()
+                            
+                            # --- FIX: Set the flag and rerun ---
+                            st.session_state.barter_proposed = True
+                            st.rerun()
+
+                        except mysql.connector.Error as err:
+                            st.error(f"Failed to submit barter: {err}")
+                        finally:
+                            cursor.close()
+                            conn.close()
 
     # Tab 2: Review Proposals (U-operation - Acceptance)
     with tab2:
         st.subheader("Proposals to Review")
         
+        # --- FIX: Added info box for debugging ---
+        st.info(f"📋 Checking for proposals where you ({user_srn}) are the 'Accepter'.")
+
         conn = get_db_connection()
         if not conn: return
         
+        # This query is correct.
         query = """
         SELECT b.BarterID, r1.Title AS ProposerItem, r2.Title AS YourItem, 
                CONCAT(s.FirstName, ' ', s.LastName) AS ProposerName
@@ -747,18 +851,46 @@ def page_barter():
         st.subheader("My Barter History")
         conn = get_db_connection()
         if conn:
+            # --- FIX: This query is now from the user's perspective and ONLY shows 'Accepted' ---
             query_history = """
-            SELECT b.BarterID, r1.Title AS ItemYouOffered, r2.Title AS ItemYouWanted, b.Status, b.BarterDate
-            FROM Barter b
-            JOIN Resource r1 ON b.Item1ID = r1.ResourceID
-            JOIN Resource r2 ON b.Item2ID = r2.ResourceID
-            WHERE b.ProposerID = %s OR b.AccepterID = %s
+            (
+                -- I was the Proposer (I GAVE Item1, I RECEIVED Item2)
+                SELECT 
+                    b.BarterID, 
+                    r1.Title AS 'Item You Gave',
+                    r2.Title AS 'Item You Received',
+                    CONCAT(s_acc.FirstName, ' ', s_acc.LastName) AS 'Traded With',
+                    b.Status, 
+                    b.BarterDate
+                FROM Barter b
+                JOIN Resource r1 ON b.Item1ID = r1.ResourceID
+                JOIN Resource r2 ON b.Item2ID = r2.ResourceID
+                JOIN Student s_acc ON b.AccepterID = s_acc.SRN
+                WHERE b.ProposerID = %s AND b.Status = 'Accepted'
+            )
+            UNION
+            (
+                -- I was the Accepter (I GAVE Item2, I RECEIVED Item1)
+                SELECT 
+                    b.BarterID, 
+                    r2.Title AS 'Item You Gave',
+                    r1.Title AS 'Item You Received',
+                    CONCAT(s_prop.FirstName, ' ', s_prop.LastName) AS 'Traded With',
+                    b.Status, 
+                    b.BarterDate
+                FROM Barter b
+                JOIN Resource r1 ON b.Item1ID = r1.ResourceID
+                JOIN Resource r2 ON b.Item2ID = r2.ResourceID
+                JOIN Student s_prop ON b.ProposerID = s_prop.SRN
+                WHERE b.AccepterID = %s AND b.Status = 'Accepted'
+            )
+            ORDER BY BarterDate DESC
             """
             df_history = pd.read_sql(query_history, conn, params=(user_srn, user_srn))
             if df_history.empty:
-                st.info("No barter history found.")
+                st.info("No accepted barter history found.")
             else:
-                st.dataframe(df_history)
+                st.dataframe(df_history, hide_index=True)
             conn.close()
 
 def page_my_activity():
@@ -774,7 +906,7 @@ def page_my_activity():
     with tab1:
         st.subheader("Items I Own")
         query_resources = """
-        SELECT r.ResourceID, r.Title, r.itemCondition, r.Status, c.MainType
+        SELECT r.ResourceID, r.Title, r.itemCondition, r.Status, c.MainType, r.ListingType
         FROM Resource r
         JOIN Category c ON r.CategoryID = c.Cat_ID
         WHERE r.OwnerID = %s
@@ -813,6 +945,7 @@ def page_my_activity():
     # Tab 2: My Purchases (Bought/Bartered)
     with tab2:
         st.subheader("Purchased Items (Buy/Sell)")
+        # This correctly shows the 'Completed' status
         query_purchases = """
         SELECT bs.BuySellID, r.Title, bs.Price, bs.Status AS SaleStatus, bs.TransactionDate
         FROM BuySell bs
@@ -823,13 +956,26 @@ def page_my_activity():
         st.dataframe(df_purchases, hide_index=True)
         
         st.subheader("Bartered Items (Acquired)")
+        # --- FIX: This query is now correct. It checks both roles (Proposer/Accepter) ---
         query_barter_acquired = """
-        SELECT b.BarterID, r.Title AS AcquiredItemTitle, b.BarterDate, b.Status
-        FROM Barter b
-        JOIN Resource r ON b.Item2ID = r.ResourceID -- Item 2 is the item the Accepter gets
-        WHERE b.AccepterID = %s AND b.Status = 'Accepted';
+        (
+            -- Find items I acquired as the PROPOSER (I get Item2)
+            SELECT b.BarterID, r2.Title AS AcquiredItemTitle, b.BarterDate, b.Status
+            FROM Barter b
+            JOIN Resource r2 ON b.Item2ID = r2.ResourceID -- Item I received
+            WHERE b.ProposerID = %s AND b.Status = 'Accepted'
+        )
+        UNION
+        (
+            -- Find items I acquired as the ACCEPTER (I get Item1)
+            SELECT b.BarterID, r1.Title AS AcquiredItemTitle, b.BarterDate, b.Status
+            FROM Barter b
+            JOIN Resource r1 ON b.Item1ID = r1.ResourceID -- Item I received
+            WHERE b.AccepterID = %s AND b.Status = 'Accepted'
+        )
+        ORDER BY BarterDate DESC
         """
-        df_barter_acquired = pd.read_sql(query_barter_acquired, conn, params=(user_srn,))
+        df_barter_acquired = pd.read_sql(query_barter_acquired, conn, params=(user_srn, user_srn))
         st.dataframe(df_barter_acquired, hide_index=True)
 
     # Tab 3: My Loans (Borrowed/Lent)
@@ -867,7 +1013,8 @@ def page_my_activity():
                         
                         # Fetch calculated penalty for display
                         cursor.execute("SELECT PenaltyAmount FROM LendBorrow WHERE LendBorrowID = %s", (return_id,))
-                        penalty = cursor.fetchone()[0]
+                        penalty_tuple = cursor.fetchone()
+                        penalty = penalty_tuple[0] if penalty_tuple else 0
                         
                         if penalty > 0:
                             st.error(f"Item returned. **LATE RETURN** - A penalty of **₹{penalty:.2f}** has been applied.")
