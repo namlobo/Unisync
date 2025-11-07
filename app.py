@@ -79,7 +79,7 @@ def render_back_button():
         if st.button("⬅️ Go Back", key="back_btn"):
             go_back()
         st.markdown('</div>', unsafe_allow_html=True)
-            
+        
 # --- DB Connection & Utility Functions ---
 
 def get_db_connection():
@@ -916,6 +916,93 @@ def page_my_activity():
         if not df_resources.empty:
             st.dataframe(df_resources)
             
+            # --- BEGIN NEW EDIT SECTION ---
+            st.markdown("---")
+            st.subheader("📝 Edit a Resource")
+            
+            # Filter for editable resources (same logic as delete)
+            editable_resources = df_resources[df_resources['Status'] == 'Available']
+            
+            if editable_resources.empty:
+                st.info("You can only edit resources currently marked as 'Available'. (Items in a pending transaction cannot be edited).")
+            else:
+                # 1. Select resource to edit
+                edit_id = st.selectbox(
+                    "Select Resource ID to Edit", 
+                    editable_resources['ResourceID'].unique(), 
+                    key="edit_select",
+                    index=None, # Better UX, no default selection
+                    placeholder="Select an item to edit..."
+                )
+                
+                if edit_id:
+                    # 2. Fetch current details for *that* resource
+                    # We must use a new cursor as the connection is used by pandas
+                    edit_cursor = conn.cursor(dictionary=True)
+                    edit_cursor.execute("SELECT Title, Description, itemCondition, ListingType FROM Resource WHERE ResourceID = %s AND OwnerID = %s", (int(edit_id), user_srn))
+                    resource_data = edit_cursor.fetchone()
+                    edit_cursor.close()
+                    
+                    if resource_data:
+                        # Define options and find current indices for selectboxes
+                        conditions = ['Excellent', 'Good', 'Fair', 'Poor']
+                        listing_types = ['Sell', 'Lend', 'Barter']
+                        
+                        try:
+                            cond_index = conditions.index(resource_data['itemCondition'])
+                        except ValueError:
+                            cond_index = 0 # Default to first
+                        
+                        try:
+                            type_index = listing_types.index(resource_data['ListingType'])
+                        except ValueError:
+                            type_index = 0 # Default to first
+
+                        # 3. Display the edit form
+                        with st.form("edit_resource_form"):
+                            st.markdown(f"**Editing Resource ID: {edit_id}** (`{resource_data['Title']}`)")
+                            
+                            new_title = st.text_input("Title", value=resource_data['Title'])
+                            new_desc = st.text_area("Description", value=resource_data['Description'], height=100)
+                            new_condition = st.selectbox("Condition", conditions, index=cond_index)
+                            new_listing_type = st.selectbox("Listing Type", listing_types, index=type_index)
+                            
+                            st.caption("Note: Changing Listing Type from 'Sell' to another type will remove its price entry. Changing *to* 'Sell' from another type is not recommended here, as a price cannot be set. Please delete and re-list the item to set a price for selling.")
+
+                            # 4. Handle submission (U-operation)
+                            submitted_update = st.form_submit_button("Save Changes")
+                            
+                            if submitted_update:
+                                if not new_title:
+                                    st.error("Title cannot be empty.")
+                                else:
+                                    try:
+                                        update_cursor = conn.cursor()
+                                        update_query = """
+                                        UPDATE Resource 
+                                        SET Title = %s, Description = %s, itemCondition = %s, ListingType = %s
+                                        WHERE ResourceID = %s AND OwnerID = %s
+                                        """
+                                        update_cursor.execute(update_query, (new_title, new_desc, new_condition, new_listing_type, int(edit_id), user_srn))
+                                        
+                                        # Clean up BuySell table if item is no longer for 'Sell'
+                                        old_type = resource_data['ListingType']
+                                        if old_type == 'Sell' and new_listing_type != 'Sell':
+                                            update_cursor.execute("DELETE FROM BuySell WHERE ItemID = %s AND SellerID = %s", (int(edit_id), user_srn))
+                                            st.info("Item is no longer listed for 'Sell', and its price entry has been removed.")
+                                        
+                                        conn.commit()
+                                        st.success(f"Resource ID {edit_id} updated successfully!")
+                                        st.rerun()
+                                        
+                                    except mysql.connector.Error as err:
+                                        st.error(f"Update failed: {err}")
+                                    finally:
+                                        if update_cursor: update_cursor.close()
+                    else:
+                        st.error("Could not find resource data. It might have been deleted.")
+            # --- END NEW EDIT SECTION ---
+
             st.markdown("---")
             st.subheader("Delete a Resource")
             deletable_resources = df_resources[df_resources['Status'] == 'Available']

@@ -324,3 +324,46 @@ BEGIN
 END$$
 
 DELIMITER ;
+
+-- JOIN QUERY: Display listed items for sale with seller info
+SELECT 
+    r.ResourceID, 
+    r.Title, 
+    r.Description, 
+    bs.Price, 
+    CONCAT(s.FirstName, ' ', s.LastName) AS SellerName, 
+    r.Status
+FROM Resource r
+JOIN Student s ON r.OwnerID = s.SRN
+JOIN BuySell bs ON r.ResourceID = bs.ItemID
+WHERE r.ListingType = 'Sell' 
+  AND bs.Status IN ('Listed', 'PendingPayment', 'Completed');
+
+-- NESTED QUERY: Find items eligible for review (completed but not yet reviewed)
+SELECT DISTINCT r.ResourceID, r.Title
+FROM Resource r
+JOIN LendBorrow lb ON r.ResourceID = lb.ItemID 
+WHERE lb.BorrowerID = 'PES2UG23CS002' 
+  AND lb.Status = 'Completed' 
+  AND r.ResourceID NOT IN (
+      SELECT rv.ItemID FROM Review rv WHERE rv.STD_ID = 'PES2UG23CS002'
+  )
+UNION
+SELECT DISTINCT r.ResourceID, r.Title
+FROM Resource r
+JOIN BuySell bs ON r.ResourceID = bs.ItemID 
+WHERE bs.BuyerID = 'PES2UG23CS002' 
+  AND bs.Status = 'Completed' 
+  AND r.ResourceID NOT IN (
+      SELECT rv.ItemID FROM Review rv WHERE rv.STD_ID = 'PES2UG23CS002'
+  );
+
+-- AGGREGATE QUERY: Calculate average rating per item
+SELECT 
+    r.Title, 
+    ROUND(AVG(rv.Rating), 2) AS AverageRating, 
+    COUNT(rv.ReviewID) AS TotalReviews
+FROM Resource r
+LEFT JOIN Review rv ON r.ResourceID = rv.ItemID
+GROUP BY r.ResourceID, r.Title
+ORDER BY AverageRating DESC;

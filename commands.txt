@@ -1,15 +1,5 @@
--- ============================================================
--- UNISYNCDB - FULL DEMONSTRATION SCRIPT
--- ============================================================
--- Run this AFTER creating the full UNISYNCDB schema.
--- Works cleanly in MySQL 8+.  Tested ✅
--- ============================================================
-
 USE UNISYNCDB;
-
--- ============================================================
--- 1️⃣ BASIC CRUD OPERATIONS (Student Table)
--- ============================================================
+-- BASIC CRUD OPERATIONS (Student Table)
 
 -- CREATE
 INSERT INTO Student (SRN, FirstName, LastName, Email, Phone, Department, JoinDate, Password) 
@@ -28,166 +18,97 @@ DELETE FROM Student WHERE SRN = 'PES2UG23CS999';
 SELECT * FROM Student WHERE SRN = 'PES2UG23CS999';
 
 
--- ============================================================
--- 2️⃣ DEMO: initiate_lend PROCEDURE + tg_lend_insert TRIGGER
--- ============================================================
 
+-- Create fresh test students
+INSERT INTO Student (SRN, FirstName, LastName, Email, Phone, Department, JoinDate, Password)
+VALUES 
+('PES2UG23CS550', 'John', 'd'souza', 'seller550@unisync.edu', '9000000550', 'CSE', '2025-01-01', 'demo550'),
+('PES2UG23CS551', 'Mary', 'Mathur', 'lender551@unisync.edu', '9000000551', 'ISE', '2025-01-01', 'demo551'),
+('PES2UG23CS555', 'Test', 'uncle', 'buyer555@unisync.edu', '9000000555', 'Electronics', '2025-01-01', 'demo555');
+
+-- Create a resource that can be sold to the new student
 INSERT INTO Resource (Title, Description, itemCondition, Status, ListingType, OwnerID, CategoryID)
-VALUES ('Data Structures Book', 'A new book for DSA', 'New', 'Available', 'Lend', 'PES2UG23CS004', 1);
+VALUES ('Python Programming Book', 'Latest edition, 2024', 'Good', 'Available', 'Sell', 'PES2UG23CS550', 1);
 
-SET @book_to_lend := LAST_INSERT_ID();
+SET @sell_resource := LAST_INSERT_ID();
 
-SELECT 'Before Procedure Call' AS Step, ResourceID, Title, Status 
-FROM Resource 
-WHERE ResourceID = @book_to_lend;
-
-CALL initiate_lend(
-    @book_to_lend,
-    'PES2UG23CS004',
-    'PES2UG23CS001',
-    '2025-11-05',
-    '2025-11-10',
-    @newLendID
-);
-
-SELECT @newLendID AS New_LendBorrow_ID_Created;
-
-SELECT 'After Procedure Call' AS Step, ResourceID, Title, Status 
-FROM Resource 
-WHERE ResourceID = @book_to_lend;
-
-SET @transID := (SELECT TransactionID FROM LendBorrow WHERE LendBorrowID = @newLendID);
-SELECT 'Reminder created by trigger' AS Step, Msg, RDate, Status 
-FROM Reminder 
-WHERE TransID = @transID;
-
-
--- ============================================================
--- 3️⃣ DEMO: complete_lend_with_penalty PROCEDURE + TRIGGER
--- ============================================================
-
-UPDATE Resource SET Status = 'Unavailable' WHERE ResourceID = 1;
-UPDATE LendBorrow SET Status = 'Active', PenaltyAmount = 0.00 WHERE LendBorrowID = 1;
-DELETE FROM Reminder WHERE Msg LIKE '%LATE RETURN%';
-
-SELECT 'Before Procedure Call' AS Step, LendBorrowID, itemID, Status, EndDate, PenaltyAmount 
-FROM LendBorrow WHERE LendBorrowID = 1;
-
-SELECT 'Before Procedure Call' AS Step, ResourceID, Status 
-FROM Resource WHERE ResourceID = 1;
-
-CALL complete_lend_with_penalty(1);
-
-SELECT 'After Procedure Call' AS Step, LendBorrowID, Status, EndDate, PenaltyAmount 
-FROM LendBorrow WHERE LendBorrowID = 1;
-
-SELECT 'After Procedure Call' AS Step, ResourceID, Status 
-FROM Resource WHERE ResourceID = 1;
-
-
--- ============================================================
--- 4️⃣ DEMO: complete_lend PROCEDURE (Simpler version)
--- ============================================================
-
--- Create another temporary lending example
-CALL initiate_lend(1, 'PES2UG23CS001', 'PES2UG23CS003', '2025-11-01', '2025-11-07', @simpleLend);
-SELECT @simpleLend AS New_Simple_LendBorrow;
-
--- Check before completing
-SELECT 'Before Complete_Lend' AS Step, Status FROM LendBorrow WHERE LendBorrowID = @simpleLend;
-
--- Call the basic complete procedure
-CALL complete_lend(@simpleLend);
-
--- Check after completion
-SELECT 'After Complete_Lend' AS Step, Status, EndDate FROM LendBorrow WHERE LendBorrowID = @simpleLend;
-
--- Resource should have returned to 'Available' by trigger
-SELECT 'Resource Status After Complete' AS Step, Status FROM Resource WHERE ResourceID = 1;
-
-
--- ============================================================
--- 5️⃣ DEMO: BuySell (SELL TRANSACTION + TRIGGER)
--- ============================================================
-
--- Add a new resource to sell
-INSERT INTO Resource (Title, Description, itemCondition, Status, ListingType, OwnerID, CategoryID)
-VALUES ('Arduino Kit', 'Basic Arduino UNO kit', 'Excellent', 'Available', 'Sell', 'PES2UG23CS002', 2);
-
-SET @sell_item := LAST_INSERT_ID();
-
--- Insert BuySell record (simulate sale)
+-- Add a BuySell transaction for this new student
 INSERT INTO Transactions (Type) VALUES ('BuySell');
 SET @buy_trans := LAST_INSERT_ID();
 
 INSERT INTO BuySell (ItemID, SellerID, BuyerID, Price, Status, TransactionDate, TransactionID)
-VALUES (@sell_item, 'PES2UG23CS002', 'PES2UG23CS003', 3000.00, 'Pending', '2025-11-05', @buy_trans);
+VALUES (@sell_resource, 'PES2UG23CS550', 'PES2UG23CS555', 800.00, 'Completed', '2025-11-06', @buy_trans);
 
--- Mark it completed → trigger tg_buysell_update_complete should mark resource as Sold
-UPDATE BuySell SET Status = 'Completed' WHERE BuySellID = LAST_INSERT_ID();
-
--- Verify
-SELECT 'After Sale Trigger' AS Step, Status FROM Resource WHERE ResourceID = @sell_item;
+-- Verify sale and trigger effect
+SELECT 'BuySell Completed' AS Step, ResourceID, Status FROM Resource WHERE ResourceID = @sell_resource;
 
 
--- ============================================================
--- 6️⃣ DEMO: LendBorrow (BORROW TRANSACTION)
--- ============================================================
-
--- Show all current lend/borrow records
-SELECT LendBorrowID, itemID, LenderID, BorrowerID, Status, PenaltyAmount FROM LendBorrow;
-
--- Borrower returning on time → call complete_lend again on another record
-CALL complete_lend(@newLendID);
-
--- Verify resource is now available again
-SELECT 'After Borrow Return' AS Step, ResourceID, Status FROM Resource WHERE ResourceID = @book_to_lend;
-
-
--- ============================================================
--- 7️⃣ DEMO: Barter (TRADE TRANSACTION + TRIGGER)
--- ============================================================
-
--- Create a new resource for barter test
+-- Create a resource that can be borrowed by this student
 INSERT INTO Resource (Title, Description, itemCondition, Status, ListingType, OwnerID, CategoryID)
-VALUES ('Desk Lamp', 'Adjustable desk lamp', 'Good', 'Available', 'Barter', 'PES2UG23CS001', 4);
+VALUES ('DBMS Reference Book', 'For semester 5', 'Excellent', 'Available', 'Lend', 'PES2UG23CS551', 1);
 
-SET @lamp := LAST_INSERT_ID();
+SET @lend_item := LAST_INSERT_ID();
 
-INSERT INTO Transactions (Type) VALUES ('Barter');
-SET @barter_trans := LAST_INSERT_ID();
+-- Create lend transaction for the new student
+CALL initiate_lend(@lend_item, 'PES2UG23CS551', 'PES2UG23CS555', '2025-11-01', '2025-11-05', @lend_demo);
 
--- Create a barter request between lamp (new) and chair (ID=3)
-INSERT INTO Barter (Item1ID, Item2ID, ProposerID, AccepterID, Status, BarterDate, TransactionID)
-VALUES (@lamp, 3, 'PES2UG23CS001', 'PES2UG23CS003', 'Pending', '2025-11-05', @barter_trans);
+-- Complete it to mark as finished (so it appears in nested queries)
+CALL complete_lend(@lend_demo);
 
--- Accept barter → trigger tg_barter_update_accepted should make both unavailable
-UPDATE Barter SET Status = 'Accepted' WHERE BarterID = LAST_INSERT_ID();
-
--- Verify both resources are unavailable
-SELECT 'After Barter Accept' AS Step, ResourceID, Title, Status 
-FROM Resource WHERE ResourceID IN (@lamp, 3);
+-- Verify that borrow was completed and resource returned
+SELECT 'Borrow Completed' AS Step, ResourceID, Status FROM Resource WHERE ResourceID = @lend_item;
 
 
--- ============================================================
--- 8️⃣ DEMO: FUNCTIONS (get_avg_rating & calculate_penalty)
--- ============================================================
+-- Create a review for one of the completed items
+INSERT INTO Review (Rating, Comments, STD_ID, ItemID)
+VALUES (5, 'Very helpful book!', 'PES2UG23CS555', @sell_resource);
 
--- ---------- get_avg_rating ----------
-SELECT get_avg_rating(2) AS AvgRating_Before;
-
-INSERT INTO Review (Rating, Comments, STD_ID, ItemID) 
-VALUES (2, 'Screen was a bit dim', 'PES2UG23CS001', 2);
-
-SELECT get_avg_rating(2) AS AvgRating_After;
-
--- ---------- calculate_penalty ----------
-SELECT calculate_penalty(1) AS Penalty_For_LendBorrow_1;
-
--- Manual penalty simulation (not part of schema, for clarity)
-SELECT DATEDIFF('2025-11-04','2025-11-01') * 10 AS ManualPenalty_3DaysLate;
+-- Add another review by same student on different item for variety
+INSERT INTO Review (Rating, Comments, STD_ID, ItemID)
+VALUES (4, 'Useful for DB concepts.', 'PES2UG23CS555', @lend_item);
 
 
--- ============================================================
--- END OF FULL UNISYNC DEMO
--- ============================================================
+-- Now rerun the three key queries again for this new student
+
+-- JOIN QUERY
+SELECT 
+    r.ResourceID, 
+    r.Title, 
+    r.Description, 
+    bs.Price, 
+    CONCAT(s.FirstName, ' ', s.LastName) AS SellerName, 
+    r.Status
+FROM Resource r
+JOIN Student s ON r.OwnerID = s.SRN
+JOIN BuySell bs ON r.ResourceID = bs.ItemID
+WHERE r.ListingType = 'Sell' 
+  AND bs.Status IN ('Listed', 'PendingPayment', 'Completed');
+
+-- NESTED QUERY
+SELECT DISTINCT r.ResourceID, r.Title
+FROM Resource r
+JOIN LendBorrow lb ON r.ResourceID = lb.ItemID 
+WHERE lb.BorrowerID = 'PES2UG23CS555' 
+  AND lb.Status = 'Completed' 
+  AND r.ResourceID NOT IN (
+      SELECT rv.ItemID FROM Review rv WHERE rv.STD_ID = 'PES2UG23CS555'
+  )
+UNION
+SELECT DISTINCT r.ResourceID, r.Title
+FROM Resource r
+JOIN BuySell bs ON r.ResourceID = bs.ItemID 
+WHERE bs.BuyerID = 'PES2UG23CS555' 
+  AND bs.Status = 'Completed' 
+  AND r.ResourceID NOT IN (
+      SELECT rv.ItemID FROM Review rv WHERE rv.STD_ID = 'PES2UG23CS555'
+  );
+
+-- AGGREGATE QUERY
+SELECT 
+    r.Title, 
+    ROUND(AVG(rv.Rating), 2) AS AverageRating, 
+    COUNT(rv.ReviewID) AS TotalReviews
+FROM Resource r
+LEFT JOIN Review rv ON r.ResourceID = rv.ItemID
+GROUP BY r.ResourceID, r.Title
+ORDER BY AverageRating DESC;
